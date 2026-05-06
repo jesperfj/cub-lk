@@ -20,14 +20,47 @@ func EnsureAvailable() error {
 	return nil
 }
 
-// Create runs `kind create cluster --name <name> --kubeconfig <path>`.
-// kind writes the cluster's kubeconfig to the given path (rather than
-// merging into ~/.kube/config) so each lk cluster's credentials stay
-// isolated. Returns the kube context name kind wires up (`kind-<name>`).
-func Create(ctx context.Context, name, kubeconfigPath string, out io.Writer) (string, error) {
+// PortMapping is a host→container port pair, both on the kind control-plane node.
+type PortMapping struct {
+	HostPort      int
+	ContainerPort int
+	Protocol      string // "TCP" or "UDP"; empty = TCP
+}
+
+// DefaultPortMappings is the set of host:container port mappings opened on
+// the kind control-plane node when no override is given. The 30000-30009
+// range mirrors the standard NodePort range so a Service of type NodePort
+// with `nodePort: 30000` is reachable as `localhost:30000`. The 8080/8443
+// pair maps the well-known dev ports to NodePort 30080/30443 for things
+// like Argo (`localhost:8443` → argocd-server NodePort 30443).
+func DefaultPortMappings() []PortMapping {
+	mappings := []PortMapping{
+		{HostPort: 8080, ContainerPort: 30080},
+		{HostPort: 8443, ContainerPort: 30443},
+	}
+	for p := 30000; p <= 30009; p++ {
+		mappings = append(mappings, PortMapping{HostPort: p, ContainerPort: p})
+	}
+	return mappings
+}
+
+// Create runs `kind create cluster --name <name> --kubeconfig <path>` with
+// a generated kind config that opens the given port mappings on the
+// control-plane node. kind writes the cluster's kubeconfig to the given
+// path (rather than merging into ~/.kube/config) so each lk cluster's
+// credentials stay isolated. Returns the kube context name kind wires up
+// (`kind-<name>`).
+func Create(ctx context.Context, name, kubeconfigPath string, ports []PortMapping, out io.Writer) (string, error) {
+	configPath, err := writeKindConfig(name, ports)
+	if err != nil {
+		return "", err
+	}
+	defer os.Remove(configPath)
+
 	cmd := exec.CommandContext(ctx, "kind", "create", "cluster",
 		"--name", name,
 		"--kubeconfig", kubeconfigPath,
+		"--config", configPath,
 	)
 	cmd.Stdout = out
 	cmd.Stderr = out
@@ -35,6 +68,44 @@ func Create(ctx context.Context, name, kubeconfigPath string, out io.Writer) (st
 		return "", fmt.Errorf("kind create cluster: %w", err)
 	}
 	return "kind-" + name, nil
+}
+
+// writeKindConfig generates a kind v1alpha4 cluster config to a temp file
+// and returns its path. The caller is responsible for removing the file.
+func writeKindConfig(name string, ports []PortMapping) (string, error) {
+	var b strings.Builder
+	b.WriteString("kind: Cluster\n")
+	b.WriteString("apiVersion: kind.x-k8s.io/v1alpha4\n")
+	b.WriteString("name: ")
+	b.WriteString(name)
+	b.WriteString("\n")
+	b.WriteString("nodes:\n")
+	b.WriteString("- role: control-plane\n")
+	if len(ports) > 0 {
+		b.WriteString("  extraPortMappings:\n")
+		for _, p := range ports {
+			proto := p.Protocol
+			if proto == "" {
+				proto = "TCP"
+			}
+			fmt.Fprintf(&b, "  - hostPort: %d\n    containerPort: %d\n    protocol: %s\n", p.HostPort, p.ContainerPort, proto)
+		}
+	}
+
+	f, err := os.CreateTemp("", "lk-kind-config-*.yaml")
+	if err != nil {
+		return "", err
+	}
+	if _, err := f.WriteString(b.String()); err != nil {
+		f.Close()
+		os.Remove(f.Name())
+		return "", err
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(f.Name())
+		return "", err
+	}
+	return f.Name(), nil
 }
 
 // Delete runs `kind delete cluster --name <name>`. kubeconfigPath, if set,

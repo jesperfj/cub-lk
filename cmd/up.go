@@ -106,8 +106,9 @@ func runUp(ctx context.Context, out io.Writer, opts upOptions) error {
 	const unitSlug = "worker-config"
 	kubeconfigPath := state.KubeconfigPathFor(opts.name)
 
+	ports := kindcli.DefaultPortMappings()
 	fmt.Fprintf(out, "Creating kind cluster %q (kubeconfig: %s)...\n", opts.name, kubeconfigPath)
-	kubeContext, err := kindcli.Create(ctx, opts.name, kubeconfigPath, out)
+	kubeContext, err := kindcli.Create(ctx, opts.name, kubeconfigPath, ports, out)
 	if err != nil {
 		return err
 	}
@@ -189,8 +190,13 @@ func runUp(ctx context.Context, out io.Writer, opts upOptions) error {
 	}
 
 	commit = true
-	fmt.Fprintf(out, "\nDone.\n  cluster:    %s\n  kubeconfig: %s\n  context:    %s\n  space:      %s\n  worker:     %s/%s\n  target:     %s/%s\n\nUse the cluster:\n  KUBECONFIG=%s kubectl get pods -A\n",
-		opts.name, kubeconfigPath, kubeContext, opts.spaceSlug, opts.spaceSlug, workerSlug, opts.spaceSlug, targetSlug, kubeconfigPath)
+	fmt.Fprintf(out, "\nDone.\n  cluster:    %s\n  kubeconfig: %s\n  context:    %s\n  space:      %s\n  worker:     %s/%s\n  target:     %s/%s\n",
+		opts.name, kubeconfigPath, kubeContext, opts.spaceSlug, opts.spaceSlug, workerSlug, opts.spaceSlug, targetSlug)
+	fmt.Fprintf(out, "\nPort mappings (host → NodePort):\n")
+	for _, p := range ports {
+		fmt.Fprintf(out, "  localhost:%-5d → nodePort %d\n", p.HostPort, p.ContainerPort)
+	}
+	fmt.Fprintf(out, "\nUse the cluster:\n  KUBECONFIG=%s kubectl get pods -A\n", kubeconfigPath)
 	return nil
 }
 

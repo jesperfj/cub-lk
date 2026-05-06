@@ -30,14 +30,11 @@ type PortMapping struct {
 // DefaultPortMappings is the set of host:container port mappings opened on
 // the kind control-plane node when no override is given. The 30000-30009
 // range mirrors the standard NodePort range so a Service of type NodePort
-// with `nodePort: 30000` is reachable as `localhost:30000`. The 8080/8443
-// pair maps the well-known dev ports to NodePort 30080/30443 for things
-// like Argo (`localhost:8443` → argocd-server NodePort 30443).
+// with `nodePort: 30000` is reachable as `localhost:30000`. We deliberately
+// avoid common ports like 8080/8443 because they're often already in use
+// on developer machines.
 func DefaultPortMappings() []PortMapping {
-	mappings := []PortMapping{
-		{HostPort: 8080, ContainerPort: 30080},
-		{HostPort: 8443, ContainerPort: 30443},
-	}
+	var mappings []PortMapping
 	for p := 30000; p <= 30009; p++ {
 		mappings = append(mappings, PortMapping{HostPort: p, ContainerPort: p})
 	}

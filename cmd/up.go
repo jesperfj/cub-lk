@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -93,6 +94,35 @@ type upOptions struct {
 	skipUnit  bool
 	mounts    []kindcli.Mount
 	noPorts   bool
+}
+
+// dockerInternalURLFor returns a rewritten URL with the loopback host
+// replaced by "host.docker.internal" so a pod inside a docker container
+// (e.g. kind's control-plane node) can reach a server running on the host.
+// Returns "" when no rewrite is needed.
+//
+// Recognized loopback hosts: localhost, 127.0.0.1, 0.0.0.0, [::1].
+// macOS/Windows Docker Desktop provides host.docker.internal automatically;
+// on Linux it requires `--add-host=host.docker.internal:host-gateway` on
+// the kind container, which we don't set up yet.
+func dockerInternalURLFor(serverURL string) string {
+	u, err := url.Parse(serverURL)
+	if err != nil {
+		return ""
+	}
+	host := u.Hostname()
+	switch host {
+	case "localhost", "127.0.0.1", "0.0.0.0", "::1":
+		port := u.Port()
+		newHost := "host.docker.internal"
+		if port != "" {
+			u.Host = newHost + ":" + port
+		} else {
+			u.Host = newHost
+		}
+		return u.String()
+	}
+	return ""
 }
 
 // parseMounts parses --mount values of the form HOST[:CONTAINER]. The host
@@ -252,8 +282,12 @@ func runUp(ctx context.Context, out io.Writer, opts upOptions) error {
 		return err
 	}
 
+	overrideURL := dockerInternalURLFor(client.Server())
+	if overrideURL != "" {
+		fmt.Fprintf(out, "Worker pod CONFIGHUB_URL: %s (rewritten from %s so pod can reach host)\n", overrideURL, client.Server())
+	}
 	fmt.Fprintf(out, "Generating worker manifest (cub worker install --export --include-secret)...\n")
-	manifest, err := kindcli.CubWorkerInstallExport(ctx, workerSlug, opts.spaceSlug)
+	manifest, err := kindcli.CubWorkerInstallExport(ctx, workerSlug, opts.spaceSlug, overrideURL)
 	if err != nil {
 		return err
 	}

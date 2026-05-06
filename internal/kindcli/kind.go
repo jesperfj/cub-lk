@@ -168,18 +168,29 @@ func KubectlApply(ctx context.Context, kubeconfigPath string, manifest []byte, o
 // We shell out (rather than re-implement) because the manifest generator is
 // 250 lines of cub-internal logic; tracking it in lk would drift over time.
 // SDK extraction candidate: lift this into cubapi as a library function.
-func CubWorkerInstallExport(ctx context.Context, workerSlug, spaceSlug string) ([]byte, error) {
+//
+// If overrideConfigHubURL is non-empty, it's passed as
+// `-e CONFIGHUB_URL=<url>` so the worker pod uses that URL instead of the
+// one cub would derive from its active context. Used for localhost servers
+// where the pod (running in a docker container) needs host.docker.internal
+// instead of localhost.
+func CubWorkerInstallExport(ctx context.Context, workerSlug, spaceSlug, overrideConfigHubURL string) ([]byte, error) {
 	if _, err := exec.LookPath("cub"); err != nil {
 		return nil, fmt.Errorf("cub not found on PATH")
 	}
-	var stdout, stderr bytes.Buffer
-	cmd := exec.CommandContext(ctx, "cub", "worker", "install",
+	args := []string{
+		"worker", "install",
 		workerSlug,
 		"--space", spaceSlug,
 		"--export",
 		"--include-secret",
 		"-t", "Kubernetes",
-	)
+	}
+	if overrideConfigHubURL != "" {
+		args = append(args, "-e", "CONFIGHUB_URL="+overrideConfigHubURL)
+	}
+	var stdout, stderr bytes.Buffer
+	cmd := exec.CommandContext(ctx, "cub", args...)
 	cmd.Env = scrubbedCubEnv()
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

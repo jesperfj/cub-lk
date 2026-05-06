@@ -4,7 +4,10 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/jesperfj/cub-lk/internal/cubclient"
@@ -19,6 +22,8 @@ func newUpCmd() *cobra.Command {
 		spaceSlug string
 		namespace string
 		skipUnit  bool
+		mountArgs []string
+		noPorts   bool
 	)
 	c := &cobra.Command{
 		Use:   "up",
@@ -28,15 +33,25 @@ containing a worker, target, and (by default) a worker-config Unit. Applies
 the worker manifest to the cluster.
 
 The cluster's kubeconfig is written to a per-cluster file under
-$CUB_CONFIG/lk/<name>.kubeconfig (not merged into ~/.kube/config).`,
+$CUB_CONFIG/lk/<name>.kubeconfig (not merged into ~/.kube/config).
+
+Use --mount HOST[:CONTAINER] (repeatable) to bind-mount host directories
+into the cluster node. Pods can then reach them via hostPath volumes on
+the container path. CONTAINER defaults to /mnt/<basename of host>.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, cancel := context.WithTimeout(cmd.Context(), 10*time.Minute)
 			defer cancel()
+			mounts, err := parseMounts(mountArgs)
+			if err != nil {
+				return err
+			}
 			return runUp(ctx, cmd.OutOrStdout(), upOptions{
 				name:      name,
 				spaceSlug: spaceSlug,
 				namespace: namespace,
 				skipUnit:  skipUnit,
+				mounts:    mounts,
+				noPorts:   noPorts,
 			})
 		},
 	}
@@ -44,6 +59,8 @@ $CUB_CONFIG/lk/<name>.kubeconfig (not merged into ~/.kube/config).`,
 	c.Flags().StringVar(&spaceSlug, "space", "", "ConfigHub space slug (defaults to <name>-cluster)")
 	c.Flags().StringVar(&namespace, "namespace", "confighub", "Kubernetes namespace for the worker target binding")
 	c.Flags().BoolVar(&skipUnit, "no-unit", false, "skip creating the worker-config Unit in ConfigHub")
+	c.Flags().StringArrayVar(&mountArgs, "mount", nil, "host:container bind mount (repeatable; container path defaults to /mnt/<basename>)")
+	c.Flags().BoolVar(&noPorts, "no-ports", false, "skip default localhost:30000-30009 port mappings (useful when running multiple lk clusters)")
 	return c
 }
 
@@ -52,6 +69,48 @@ type upOptions struct {
 	spaceSlug string
 	namespace string
 	skipUnit  bool
+	mounts    []kindcli.Mount
+	noPorts   bool
+}
+
+// parseMounts parses --mount values of the form HOST[:CONTAINER]. The host
+// path is tilde- and relative-expanded to absolute and validated to exist;
+// container defaults to /mnt/<basename>.
+func parseMounts(args []string) ([]kindcli.Mount, error) {
+	if len(args) == 0 {
+		return nil, nil
+	}
+	out := make([]kindcli.Mount, 0, len(args))
+	for _, raw := range args {
+		host, container, _ := strings.Cut(raw, ":")
+		host = strings.TrimSpace(host)
+		container = strings.TrimSpace(container)
+		if host == "" {
+			return nil, fmt.Errorf("--mount %q: empty host path", raw)
+		}
+		if strings.HasPrefix(host, "~") {
+			home, err := os.UserHomeDir()
+			if err != nil {
+				return nil, fmt.Errorf("--mount %q: expand ~: %w", raw, err)
+			}
+			host = filepath.Join(home, strings.TrimPrefix(host, "~"))
+		}
+		abs, err := filepath.Abs(host)
+		if err != nil {
+			return nil, fmt.Errorf("--mount %q: resolve %q: %w", raw, host, err)
+		}
+		if _, err := os.Stat(abs); err != nil {
+			return nil, fmt.Errorf("--mount %q: %w", raw, err)
+		}
+		if container == "" {
+			container = "/mnt/" + filepath.Base(abs)
+		}
+		if !strings.HasPrefix(container, "/") {
+			return nil, fmt.Errorf("--mount %q: container path must be absolute", raw)
+		}
+		out = append(out, kindcli.Mount{HostPath: abs, ContainerPath: container})
+	}
+	return out, nil
 }
 
 func runUp(ctx context.Context, out io.Writer, opts upOptions) error {
@@ -106,9 +165,12 @@ func runUp(ctx context.Context, out io.Writer, opts upOptions) error {
 	const unitSlug = "worker-config"
 	kubeconfigPath := state.KubeconfigPathFor(opts.name)
 
-	ports := kindcli.DefaultPortMappings()
+	var ports []kindcli.PortMapping
+	if !opts.noPorts {
+		ports = kindcli.DefaultPortMappings()
+	}
 	fmt.Fprintf(out, "Creating kind cluster %q (kubeconfig: %s)...\n", opts.name, kubeconfigPath)
-	kubeContext, err := kindcli.Create(ctx, opts.name, kubeconfigPath, ports, out)
+	kubeContext, err := kindcli.Create(ctx, opts.name, kubeconfigPath, ports, opts.mounts, out)
 	if err != nil {
 		return err
 	}
@@ -192,9 +254,19 @@ func runUp(ctx context.Context, out io.Writer, opts upOptions) error {
 	commit = true
 	fmt.Fprintf(out, "\nDone.\n  cluster:    %s\n  kubeconfig: %s\n  context:    %s\n  space:      %s\n  worker:     %s/%s\n  target:     %s/%s\n",
 		opts.name, kubeconfigPath, kubeContext, opts.spaceSlug, opts.spaceSlug, workerSlug, opts.spaceSlug, targetSlug)
-	fmt.Fprintf(out, "\nPort mappings (host → NodePort):\n")
-	for _, p := range ports {
-		fmt.Fprintf(out, "  localhost:%-5d → nodePort %d\n", p.HostPort, p.ContainerPort)
+	if len(ports) > 0 {
+		fmt.Fprintf(out, "\nPort mappings (host → NodePort):\n")
+		for _, p := range ports {
+			fmt.Fprintf(out, "  localhost:%-5d → nodePort %d\n", p.HostPort, p.ContainerPort)
+		}
+	} else {
+		fmt.Fprintf(out, "\nPort mappings: none (use kubectl port-forward to reach services).\n")
+	}
+	if len(opts.mounts) > 0 {
+		fmt.Fprintf(out, "\nHost mounts (host → node, accessible to pods via hostPath):\n")
+		for _, m := range opts.mounts {
+			fmt.Fprintf(out, "  %s → %s\n", m.HostPath, m.ContainerPath)
+		}
 	}
 	fmt.Fprintf(out, "\nUse the cluster:\n  KUBECONFIG=%s kubectl get pods -A\n", kubeconfigPath)
 	return nil

@@ -27,6 +27,13 @@ type PortMapping struct {
 	Protocol      string // "TCP" or "UDP"; empty = TCP
 }
 
+// Mount is a host→node bind mount (kind extraMounts). Pods can then
+// reach the host path via a hostPath volume on ContainerPath.
+type Mount struct {
+	HostPath      string
+	ContainerPath string
+}
+
 // DefaultPortMappings is the set of host:container port mappings opened on
 // the kind control-plane node when no override is given. The 30000-30009
 // range mirrors the standard NodePort range so a Service of type NodePort
@@ -42,13 +49,13 @@ func DefaultPortMappings() []PortMapping {
 }
 
 // Create runs `kind create cluster --name <name> --kubeconfig <path>` with
-// a generated kind config that opens the given port mappings on the
-// control-plane node. kind writes the cluster's kubeconfig to the given
-// path (rather than merging into ~/.kube/config) so each lk cluster's
-// credentials stay isolated. Returns the kube context name kind wires up
-// (`kind-<name>`).
-func Create(ctx context.Context, name, kubeconfigPath string, ports []PortMapping, out io.Writer) (string, error) {
-	configPath, err := writeKindConfig(name, ports)
+// a generated kind config that opens the given port mappings and host
+// mounts on the control-plane node. kind writes the cluster's kubeconfig
+// to the given path (rather than merging into ~/.kube/config) so each lk
+// cluster's credentials stay isolated. Returns the kube context name kind
+// wires up (`kind-<name>`).
+func Create(ctx context.Context, name, kubeconfigPath string, ports []PortMapping, mounts []Mount, out io.Writer) (string, error) {
+	configPath, err := writeKindConfig(name, ports, mounts)
 	if err != nil {
 		return "", err
 	}
@@ -69,7 +76,7 @@ func Create(ctx context.Context, name, kubeconfigPath string, ports []PortMappin
 
 // writeKindConfig generates a kind v1alpha4 cluster config to a temp file
 // and returns its path. The caller is responsible for removing the file.
-func writeKindConfig(name string, ports []PortMapping) (string, error) {
+func writeKindConfig(name string, ports []PortMapping, mounts []Mount) (string, error) {
 	var b strings.Builder
 	b.WriteString("kind: Cluster\n")
 	b.WriteString("apiVersion: kind.x-k8s.io/v1alpha4\n")
@@ -86,6 +93,12 @@ func writeKindConfig(name string, ports []PortMapping) (string, error) {
 				proto = "TCP"
 			}
 			fmt.Fprintf(&b, "  - hostPort: %d\n    containerPort: %d\n    protocol: %s\n", p.HostPort, p.ContainerPort, proto)
+		}
+	}
+	if len(mounts) > 0 {
+		b.WriteString("  extraMounts:\n")
+		for _, m := range mounts {
+			fmt.Fprintf(&b, "  - hostPath: %s\n    containerPath: %s\n", m.HostPath, m.ContainerPath)
 		}
 	}
 

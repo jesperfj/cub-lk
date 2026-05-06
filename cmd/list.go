@@ -3,7 +3,9 @@ package cmd
 import (
 	"fmt"
 	"io"
+	"text/tabwriter"
 
+	"github.com/jesperfj/cub-lk/internal/state"
 	"github.com/spf13/cobra"
 )
 
@@ -18,6 +20,18 @@ func newListCmd() *cobra.Command {
 }
 
 func runList(out io.Writer) error {
-	fmt.Fprintln(out, "lk list: no clusters tracked yet (not implemented)")
-	return nil
+	st, err := state.Load()
+	if err != nil {
+		return err
+	}
+	if len(st.Clusters) == 0 {
+		fmt.Fprintln(out, "No clusters tracked.")
+		return nil
+	}
+	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "NAME\tCONTEXT\tSPACE\tCREATED")
+	for _, c := range st.Clusters {
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", c.Name, c.KubeContext, c.SpaceSlug, c.CreatedAt.Format("2006-01-02 15:04"))
+	}
+	return tw.Flush()
 }

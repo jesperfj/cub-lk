@@ -25,7 +25,10 @@ func newUpCmd() *cobra.Command {
 		Short: "Bring up a local kind cluster and connect it to ConfigHub",
 		Long: `Creates a kind cluster and a ConfigHub Space (default name "<name>-cluster")
 containing a worker, target, and (by default) a worker-config Unit. Applies
-the worker manifest to the cluster.`,
+the worker manifest to the cluster.
+
+The cluster's kubeconfig is written to a per-cluster file under
+$CUB_CONFIG/lk/<name>.kubeconfig (not merged into ~/.kube/config).`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, cancel := context.WithTimeout(cmd.Context(), 10*time.Minute)
 			defer cancel()
@@ -101,16 +104,17 @@ func runUp(ctx context.Context, out io.Writer, opts upOptions) error {
 	const workerSlug = "worker"
 	const targetSlug = "target"
 	const unitSlug = "worker-config"
+	kubeconfigPath := state.KubeconfigPathFor(opts.name)
 
-	fmt.Fprintf(out, "Creating kind cluster %q...\n", opts.name)
-	kubeContext, err := kindcli.Create(ctx, opts.name, out)
+	fmt.Fprintf(out, "Creating kind cluster %q (kubeconfig: %s)...\n", opts.name, kubeconfigPath)
+	kubeContext, err := kindcli.Create(ctx, opts.name, kubeconfigPath, out)
 	if err != nil {
 		return err
 	}
 	rollback := []func(){
 		func() {
 			fmt.Fprintf(out, "Rolling back: kind delete cluster %q\n", opts.name)
-			_ = kindcli.Delete(context.Background(), opts.name, out)
+			_ = kindcli.Delete(context.Background(), opts.name, kubeconfigPath, out)
 		},
 	}
 	commit := false
@@ -128,18 +132,21 @@ func runUp(ctx context.Context, out io.Writer, opts upOptions) error {
 	if err != nil {
 		return err
 	}
+	_ = spaceID // kept for future per-entity cleanup hooks
 	rollback = append(rollback, func() {
-		fmt.Fprintf(out, "Rolling back: cub space delete %q\n", opts.spaceSlug)
-		_ = client.DeleteSpaceBySlug(context.Background(), opts.spaceSlug)
+		fmt.Fprintf(out, "Rolling back: cub space delete --recursive %q\n", opts.spaceSlug)
+		_ = client.DeleteSpaceBySlug(context.Background(), opts.spaceSlug, true)
 	})
 
-	fmt.Fprintf(out, "Generating worker manifest (cub worker install --export)...\n")
-	manifest, err := kindcli.CubWorkerInstallExport(ctx, workerSlug, opts.spaceSlug)
+	fmt.Fprintf(out, "Creating ConfigHub worker %q (Kubernetes provider)...\n", workerSlug)
+	workerID, err := client.CreateBridgeWorker(ctx, spaceID, workerSlug, workerSlug,
+		[][2]string{{"Kubernetes", "Kubernetes/YAML"}})
 	if err != nil {
 		return err
 	}
 
-	workerID, err := client.LookupBridgeWorker(ctx, spaceID, workerSlug)
+	fmt.Fprintf(out, "Generating worker manifest (cub worker install --export --include-secret)...\n")
+	manifest, err := kindcli.CubWorkerInstallExport(ctx, workerSlug, opts.spaceSlug)
 	if err != nil {
 		return err
 	}
@@ -157,18 +164,19 @@ func runUp(ctx context.Context, out io.Writer, opts upOptions) error {
 		}
 	}
 
-	fmt.Fprintf(out, "Applying worker manifest to cluster (kubectl --context %s apply)...\n", kubeContext)
-	if err := kindcli.KubectlApply(ctx, kubeContext, manifest, out); err != nil {
+	fmt.Fprintf(out, "Applying worker manifest to cluster (kubectl --kubeconfig %s apply)...\n", kubeconfigPath)
+	if err := kindcli.KubectlApply(ctx, kubeconfigPath, manifest, out); err != nil {
 		return err
 	}
 
 	rec := state.Cluster{
-		Name:        opts.name,
-		KubeContext: kubeContext,
-		SpaceSlug:   opts.spaceSlug,
-		WorkerSlug:  workerSlug,
-		TargetSlug:  targetSlug,
-		CreatedAt:   time.Now().UTC(),
+		Name:           opts.name,
+		KubeContext:    kubeContext,
+		KubeconfigPath: kubeconfigPath,
+		SpaceSlug:      opts.spaceSlug,
+		WorkerSlug:     workerSlug,
+		TargetSlug:     targetSlug,
+		CreatedAt:      time.Now().UTC(),
 	}
 	if !opts.skipUnit {
 		rec.UnitSlug = unitSlug
@@ -181,7 +189,8 @@ func runUp(ctx context.Context, out io.Writer, opts upOptions) error {
 	}
 
 	commit = true
-	fmt.Fprintf(out, "\nDone.\n  cluster:  %s\n  context:  %s\n  space:    %s\n  worker:   %s/%s\n  target:   %s/%s\n",
-		opts.name, kubeContext, opts.spaceSlug, opts.spaceSlug, workerSlug, opts.spaceSlug, targetSlug)
+	fmt.Fprintf(out, "\nDone.\n  cluster:    %s\n  kubeconfig: %s\n  context:    %s\n  space:      %s\n  worker:     %s/%s\n  target:     %s/%s\n\nUse the cluster:\n  KUBECONFIG=%s kubectl get pods -A\n",
+		opts.name, kubeconfigPath, kubeContext, opts.spaceSlug, opts.spaceSlug, workerSlug, opts.spaceSlug, targetSlug, kubeconfigPath)
 	return nil
 }
+

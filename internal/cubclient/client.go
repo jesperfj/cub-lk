@@ -143,14 +143,98 @@ func (c *Client) CreateSpace(ctx context.Context, slug, displayName string, labe
 	return resp.JSON200.SpaceID, nil
 }
 
-// DeleteSpaceBySlug deletes a space by its slug. Cascade-deletes its
-// workers, targets, and units server-side.
-func (c *Client) DeleteSpaceBySlug(ctx context.Context, slug string) error {
+// DeleteUnitBySlug deletes a unit by slug within a space.
+func (c *Client) DeleteUnitBySlug(ctx context.Context, spaceID uuid.UUID, slug string) error {
+	resp, err := c.api.ListUnitsWithResponse(ctx, spaceID, &goclient.ListUnitsParams{})
+	if err != nil {
+		return err
+	}
+	if resp.JSON200 == nil {
+		return nil
+	}
+	for _, ext := range *resp.JSON200 {
+		if ext.Unit != nil && ext.Unit.Slug == slug {
+			r, err := c.api.DeleteUnitWithResponse(ctx, spaceID, ext.Unit.UnitID)
+			if err != nil {
+				return err
+			}
+			if r.StatusCode() != http.StatusOK && r.StatusCode() != http.StatusNoContent {
+				return fmt.Errorf("delete unit %q: %s: %s", slug, r.Status(), string(r.Body))
+			}
+			return nil
+		}
+	}
+	return nil
+}
+
+// DeleteTargetBySlug deletes a target by slug within a space.
+func (c *Client) DeleteTargetBySlug(ctx context.Context, spaceID uuid.UUID, slug string) error {
+	resp, err := c.api.ListTargetsWithResponse(ctx, spaceID, &goclient.ListTargetsParams{})
+	if err != nil {
+		return err
+	}
+	if resp.JSON200 == nil {
+		return nil
+	}
+	for _, ext := range *resp.JSON200 {
+		if ext.Target != nil && ext.Target.Slug == slug {
+			r, err := c.api.DeleteTargetWithResponse(ctx, spaceID, ext.Target.TargetID)
+			if err != nil {
+				return err
+			}
+			if r.StatusCode() != http.StatusOK && r.StatusCode() != http.StatusNoContent {
+				return fmt.Errorf("delete target %q: %s: %s", slug, r.Status(), string(r.Body))
+			}
+			return nil
+		}
+	}
+	return nil
+}
+
+// DeleteBridgeWorkerBySlug deletes a worker by slug within a space.
+func (c *Client) DeleteBridgeWorkerBySlug(ctx context.Context, spaceID uuid.UUID, slug string) error {
+	resp, err := c.api.ListBridgeWorkersWithResponse(ctx, spaceID, &goclient.ListBridgeWorkersParams{})
+	if err != nil {
+		return err
+	}
+	if resp.JSON200 == nil {
+		return nil
+	}
+	for _, ext := range *resp.JSON200 {
+		if ext.BridgeWorker != nil && ext.BridgeWorker.Slug == slug {
+			r, err := c.api.DeleteBridgeWorkerWithResponse(ctx, spaceID, ext.BridgeWorker.BridgeWorkerID)
+			if err != nil {
+				return err
+			}
+			if r.StatusCode() != http.StatusOK && r.StatusCode() != http.StatusNoContent {
+				return fmt.Errorf("delete worker %q: %s: %s", slug, r.Status(), string(r.Body))
+			}
+			return nil
+		}
+	}
+	return nil
+}
+
+// SpaceIDBySlug exposes the internal lookup so callers can chain
+// per-entity deletes.
+func (c *Client) SpaceIDBySlug(ctx context.Context, slug string) (uuid.UUID, error) {
+	return c.spaceIDBySlug(ctx, slug)
+}
+
+// DeleteSpaceBySlug deletes a space by its slug. If recursive is true, the
+// server cascades deletion to units, targets, and workers within the space
+// (subject to delete gates).
+func (c *Client) DeleteSpaceBySlug(ctx context.Context, slug string, recursive bool) error {
 	id, err := c.spaceIDBySlug(ctx, slug)
 	if err != nil {
 		return err
 	}
-	resp, err := c.api.DeleteSpaceWithResponse(ctx, id, &goclient.DeleteSpaceParams{})
+	params := &goclient.DeleteSpaceParams{}
+	if recursive {
+		t := "true"
+		params.Recursive = &t
+	}
+	resp, err := c.api.DeleteSpaceWithResponse(ctx, id, params)
 	if err != nil {
 		return err
 	}
@@ -176,25 +260,42 @@ func (c *Client) spaceIDBySlug(ctx context.Context, slug string) (uuid.UUID, err
 	return uuid.Nil, fmt.Errorf("space %q not found", slug)
 }
 
-// LookupBridgeWorker returns the UUID of a worker by slug within a space.
-// Use this after `cub worker install` has implicitly created it.
-func (c *Client) LookupBridgeWorker(ctx context.Context, spaceID uuid.UUID, slug string) (uuid.UUID, error) {
-	resp, err := c.api.ListBridgeWorkersWithResponse(ctx, spaceID, &goclient.ListBridgeWorkersParams{})
+// CreateBridgeWorker creates a worker entity and pre-declares its supported
+// ConfigTypes so we don't have to wait for the worker pod to connect before
+// binding targets. Returns the worker's UUID.
+//
+// configTypes is a list of (ProviderType, ToolchainType) pairs, e.g.
+// {{"Kubernetes", "Kubernetes/YAML"}}. LiveStateType is set to ToolchainType.
+func (c *Client) CreateBridgeWorker(ctx context.Context, spaceID uuid.UUID, slug, displayName string, configTypes [][2]string) (uuid.UUID, error) {
+	supported := make([]goclient.SupportedConfigType, 0, len(configTypes))
+	for _, ct := range configTypes {
+		supported = append(supported, goclient.SupportedConfigType{
+			ProviderType:  ct[0],
+			ToolchainType: ct[1],
+			LiveStateType: ct[1],
+		})
+	}
+	body := goclient.BridgeWorker{
+		SpaceID:     spaceID,
+		Slug:        slug,
+		DisplayName: displayName,
+		ProvidedInfo: &goclient.WorkerInfo{
+			BridgeWorkerInfo: &goclient.BridgeWorkerInfo{
+				SupportedConfigTypes: supported,
+			},
+		},
+	}
+	resp, err := c.api.CreateBridgeWorkerWithResponse(ctx, spaceID, &goclient.CreateBridgeWorkerParams{}, body)
 	if err != nil {
 		return uuid.Nil, err
 	}
 	if resp.StatusCode() != http.StatusOK {
-		return uuid.Nil, fmt.Errorf("list workers: %s: %s", resp.Status(), string(resp.Body))
+		return uuid.Nil, fmt.Errorf("create worker %q: %s: %s", slug, resp.Status(), string(resp.Body))
 	}
 	if resp.JSON200 == nil {
-		return uuid.Nil, fmt.Errorf("worker %q not found", slug)
+		return uuid.Nil, fmt.Errorf("create worker %q: empty response", slug)
 	}
-	for _, ext := range *resp.JSON200 {
-		if ext.BridgeWorker != nil && ext.BridgeWorker.Slug == slug {
-			return ext.BridgeWorker.BridgeWorkerID, nil
-		}
-	}
-	return uuid.Nil, fmt.Errorf("worker %q not found in space", slug)
+	return resp.JSON200.BridgeWorkerID, nil
 }
 
 // CreateKubernetesTarget creates a Kubernetes/YAML target bound to the

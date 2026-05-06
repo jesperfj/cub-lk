@@ -14,13 +14,19 @@ import (
 )
 
 type Cluster struct {
-	Name        string    `yaml:"name"`
-	KubeContext string    `yaml:"kubeContext"`
-	SpaceSlug   string    `yaml:"spaceSlug"`
-	WorkerSlug  string    `yaml:"workerSlug"`
-	TargetSlug  string    `yaml:"targetSlug"`
-	UnitSlug    string    `yaml:"unitSlug,omitempty"`
-	CreatedAt   time.Time `yaml:"createdAt"`
+	Name           string    `yaml:"name"`
+	KubeContext    string    `yaml:"kubeContext"`
+	KubeconfigPath string    `yaml:"kubeconfigPath"`
+	SpaceSlug      string    `yaml:"spaceSlug"`
+	WorkerSlug     string    `yaml:"workerSlug"`
+	TargetSlug     string    `yaml:"targetSlug"`
+	UnitSlug       string    `yaml:"unitSlug,omitempty"`
+	CreatedAt      time.Time `yaml:"createdAt"`
+}
+
+// KubeconfigPathFor returns the standard per-cluster kubeconfig path.
+func KubeconfigPathFor(name string) string {
+	return filepath.Join(filepath.Dir(Path()), name+".kubeconfig")
 }
 
 type State struct {

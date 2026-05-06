@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strings"
 )
@@ -19,11 +20,15 @@ func EnsureAvailable() error {
 	return nil
 }
 
-// Create runs `kind create cluster --name <name>`. stdout/stderr stream to
-// the provided writer so the user sees kind's progress. Returns the kube
-// context name kind wires up (`kind-<name>`).
-func Create(ctx context.Context, name string, out io.Writer) (string, error) {
-	cmd := exec.CommandContext(ctx, "kind", "create", "cluster", "--name", name)
+// Create runs `kind create cluster --name <name> --kubeconfig <path>`.
+// kind writes the cluster's kubeconfig to the given path (rather than
+// merging into ~/.kube/config) so each lk cluster's credentials stay
+// isolated. Returns the kube context name kind wires up (`kind-<name>`).
+func Create(ctx context.Context, name, kubeconfigPath string, out io.Writer) (string, error) {
+	cmd := exec.CommandContext(ctx, "kind", "create", "cluster",
+		"--name", name,
+		"--kubeconfig", kubeconfigPath,
+	)
 	cmd.Stdout = out
 	cmd.Stderr = out
 	if err := cmd.Run(); err != nil {
@@ -32,9 +37,14 @@ func Create(ctx context.Context, name string, out io.Writer) (string, error) {
 	return "kind-" + name, nil
 }
 
-// Delete runs `kind delete cluster --name <name>`.
-func Delete(ctx context.Context, name string, out io.Writer) error {
-	cmd := exec.CommandContext(ctx, "kind", "delete", "cluster", "--name", name)
+// Delete runs `kind delete cluster --name <name>`. kubeconfigPath, if set,
+// scopes the credential cleanup to the dedicated file.
+func Delete(ctx context.Context, name, kubeconfigPath string, out io.Writer) error {
+	args := []string{"delete", "cluster", "--name", name}
+	if kubeconfigPath != "" {
+		args = append(args, "--kubeconfig", kubeconfigPath)
+	}
+	cmd := exec.CommandContext(ctx, "kind", args...)
 	cmd.Stdout = out
 	cmd.Stderr = out
 	if err := cmd.Run(); err != nil {
@@ -57,12 +67,12 @@ func Exists(ctx context.Context, name string) (bool, error) {
 	return false, nil
 }
 
-// KubectlApply pipes the manifest to `kubectl --context <ctx> apply -f -`.
-func KubectlApply(ctx context.Context, kubeContext string, manifest []byte, out io.Writer) error {
+// KubectlApply pipes the manifest to `kubectl --kubeconfig <path> apply -f -`.
+func KubectlApply(ctx context.Context, kubeconfigPath string, manifest []byte, out io.Writer) error {
 	if _, err := exec.LookPath("kubectl"); err != nil {
 		return fmt.Errorf("kubectl not found on PATH")
 	}
-	cmd := exec.CommandContext(ctx, "kubectl", "--context", kubeContext, "apply", "-f", "-")
+	cmd := exec.CommandContext(ctx, "kubectl", "--kubeconfig", kubeconfigPath, "apply", "-f", "-")
 	cmd.Stdin = bytes.NewReader(manifest)
 	cmd.Stdout = out
 	cmd.Stderr = out
@@ -86,12 +96,45 @@ func CubWorkerInstallExport(ctx context.Context, workerSlug, spaceSlug string) (
 		workerSlug,
 		"--space", spaceSlug,
 		"--export",
+		"--include-secret",
 		"-t", "Kubernetes",
 	)
+	cmd.Env = scrubbedCubEnv()
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		return nil, fmt.Errorf("cub worker install --export: %w: %s", err, strings.TrimSpace(stderr.String()))
 	}
 	return stdout.Bytes(), nil
+}
+
+// scrubbedCubEnv returns the current process env minus CUB_CONFIG and
+// CUB_PLUGIN. Background: when lk runs as a cub plugin, the parent cub sets
+// CUB_CONFIG to the config *directory* (~/.confighub) and CUB_PLUGIN=1.
+// However, cub's own NewContextManagerWithPath treats CUB_CONFIG as a *file*
+// path, so any cub subprocess that inherits CUB_CONFIG=<dir> crashes with
+// "read <dir>: is a directory". Scrubbing lets the child cub use its
+// default config file location.
+//
+// Bug report worth filing against cub: the plugin developer guide
+// documents CUB_CONFIG as a directory, but main.go treats it as a file.
+func scrubbedCubEnv() []string {
+	skip := map[string]struct{}{
+		"CUB_CONFIG": {},
+		"CUB_PLUGIN": {},
+	}
+	src := os.Environ()
+	out := make([]string, 0, len(src))
+	for _, kv := range src {
+		eq := strings.IndexByte(kv, '=')
+		if eq < 0 {
+			out = append(out, kv)
+			continue
+		}
+		if _, drop := skip[kv[:eq]]; drop {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
 }

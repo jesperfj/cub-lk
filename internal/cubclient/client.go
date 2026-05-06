@@ -124,11 +124,12 @@ func (c *Client) SpaceExists(ctx context.Context, slug string) (bool, error) {
 }
 
 // CreateSpace creates a new space and returns its UUID.
-func (c *Client) CreateSpace(ctx context.Context, slug, displayName string, labels map[string]string) (uuid.UUID, error) {
+func (c *Client) CreateSpace(ctx context.Context, slug, displayName string, labels, annotations map[string]string) (uuid.UUID, error) {
 	body := goclient.Space{
 		Slug:        slug,
 		DisplayName: displayName,
 		Labels:      labels,
+		Annotations: annotations,
 	}
 	resp, err := c.api.CreateSpaceWithResponse(ctx, &goclient.CreateSpaceParams{}, body)
 	if err != nil {

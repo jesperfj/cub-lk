@@ -21,6 +21,7 @@ type Cluster struct {
 	WorkerSlug     string    `yaml:"workerSlug"`
 	TargetSlug     string    `yaml:"targetSlug"`
 	UnitSlug       string    `yaml:"unitSlug,omitempty"`
+	PortRange      string    `yaml:"portRange,omitempty"`
 	CreatedAt      time.Time `yaml:"createdAt"`
 }
 

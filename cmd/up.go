@@ -11,9 +11,31 @@ import (
 	"time"
 
 	"github.com/jesperfj/cub-lk/internal/cubclient"
+	"github.com/jesperfj/cub-lk/internal/docker"
 	"github.com/jesperfj/cub-lk/internal/kindcli"
 	"github.com/jesperfj/cub-lk/internal/state"
 	"github.com/spf13/cobra"
+)
+
+const (
+	// Annotation keys recorded on every lk-created Space. The "ijn.me/"
+	// prefix is the author's personal domain. Annotations are visible via
+	// `cub space get -o yaml` and the UI but are not currently usable in
+	// `--where` filters (the where-filter parser doesn't accept dotted or
+	// hyphenated label/annotation keys). For "show me all lk spaces" use
+	// the labelLk Label below.
+	annotationClusterName = "ijn.me/cub-lk-cluster-name"
+	annotationPortRange   = "ijn.me/cub-lk-port-range"
+	annotationHost        = "ijn.me/cub-lk-host"
+
+	// labelLk is a simple-keyed marker label set on every lk Space so it
+	// IS queryable: `cub space list --where "Labels.cubLk = 'true'"`.
+	labelLk = "cubLk"
+
+	// Default search range and window size for port allocation.
+	portRangeStart = 30000
+	portRangeEnd   = 30099
+	portRangeSize  = 10
 )
 
 func newUpCmd() *cobra.Command {
@@ -166,8 +188,21 @@ func runUp(ctx context.Context, out io.Writer, opts upOptions) error {
 	kubeconfigPath := state.KubeconfigPathFor(opts.name)
 
 	var ports []kindcli.PortMapping
+	var portRange string
 	if !opts.noPorts {
-		ports = kindcli.DefaultPortMappings()
+		bound, err := docker.BoundHostPorts(ctx)
+		if err != nil {
+			return fmt.Errorf("probe docker for bound ports: %w", err)
+		}
+		startPort, err := docker.PickFreePortWindow(bound, portRangeStart, portRangeEnd, portRangeSize)
+		if err != nil {
+			return err
+		}
+		ports = make([]kindcli.PortMapping, 0, portRangeSize)
+		for p := startPort; p < startPort+portRangeSize; p++ {
+			ports = append(ports, kindcli.PortMapping{HostPort: p, ContainerPort: p})
+		}
+		portRange = fmt.Sprintf("%d-%d", startPort, startPort+portRangeSize-1)
 	}
 	fmt.Fprintf(out, "Creating kind cluster %q (kubeconfig: %s)...\n", opts.name, kubeconfigPath)
 	kubeContext, err := kindcli.Create(ctx, opts.name, kubeconfigPath, ports, opts.mounts, out)
@@ -191,7 +226,16 @@ func runUp(ctx context.Context, out io.Writer, opts upOptions) error {
 	}()
 
 	fmt.Fprintf(out, "Creating ConfigHub space %q...\n", opts.spaceSlug)
-	spaceID, err := client.CreateSpace(ctx, opts.spaceSlug, opts.spaceSlug, map[string]string{"managed-by": "lk"})
+	hostname, _ := os.Hostname()
+	annotations := map[string]string{
+		annotationClusterName: opts.name,
+		annotationHost:        hostname,
+	}
+	if portRange != "" {
+		annotations[annotationPortRange] = portRange
+	}
+	spaceID, err := client.CreateSpace(ctx, opts.spaceSlug, opts.spaceSlug,
+		map[string]string{labelLk: "true"}, annotations)
 	if err != nil {
 		return err
 	}
@@ -239,6 +283,7 @@ func runUp(ctx context.Context, out io.Writer, opts upOptions) error {
 		SpaceSlug:      opts.spaceSlug,
 		WorkerSlug:     workerSlug,
 		TargetSlug:     targetSlug,
+		PortRange:      portRange,
 		CreatedAt:      time.Now().UTC(),
 	}
 	if !opts.skipUnit {

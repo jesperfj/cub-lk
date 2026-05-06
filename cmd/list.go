@@ -29,9 +29,13 @@ func runList(out io.Writer) error {
 		return nil
 	}
 	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tSPACE\tKUBECONFIG\tCREATED")
+	fmt.Fprintln(tw, "NAME\tSPACE\tPORTS\tKUBECONFIG\tCREATED")
 	for _, c := range st.Clusters {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", c.Name, c.SpaceSlug, c.KubeconfigPath, c.CreatedAt.Format("2006-01-02 15:04"))
+		ports := c.PortRange
+		if ports == "" {
+			ports = "-"
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", c.Name, c.SpaceSlug, ports, c.KubeconfigPath, c.CreatedAt.Format("2006-01-02 15:04"))
 	}
 	return tw.Flush()
 }

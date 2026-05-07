@@ -242,19 +242,6 @@ cub --context local lk up
 
 `cub` forwards the active context's server URL and token to the plugin via env. There's no separate `--server` flag on `lk` itself — context selection is the supported mechanism.
 
-### No state file
-
-There is no `state.yaml`. lk derives everything it needs at command time from two authoritative sources:
-
-- Per-cluster kubeconfig files at `$CUB_CONFIG/lk/<name>.kubeconfig` — the marker that says "lk created this cluster on this host" (created by `lk up`, removed by `lk down`).
-- ConfigHub Spaces in the current cub context with `Labels.cub-lk = 'true'` and the `ijn.me/cub-lk-host` annotation matching this hostname.
-
-This means lk can never get out of sync with itself. Drift between local and ConfigHub state is visible in `lk list`'s STATUS column and is recoverable manually:
-
-- Lk-managed Space without local kind cluster → `cub space delete <slug> --recursive`
-- Local kubeconfig + kind cluster without matching Space → `cub lk down --name <n> --force` (or just `kind delete cluster --name <n>` and `rm <kubeconfig>`).
-- Find lk-managed Spaces across your cub org with `cub space list --where "Labels.cub-lk = 'true'"`.
-
 ## Common workflows
 
 ### Run ArgoCD locally

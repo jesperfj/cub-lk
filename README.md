@@ -200,7 +200,7 @@ Find all your lk clusters across the org:
 cub space list --where "Labels.cub-lk = 'true'"
 ```
 
-(Currently `--where Annotations.X` is not supported by cub; tracked in [confighubai/confighub#4346](https://github.com/confighubai/confighub/issues/4346). Annotations are still visible via `cub space get -o yaml` and the UI.)
+(Currently `cub --where Annotations.X` is not supported, so the structured annotations aren't directly filterable; the `Labels.cub-lk` marker covers the "show me all my lk clusters" case. Annotations are still visible via `cub space get -o yaml` and the UI.)
 
 ### Host filesystem mounts
 
@@ -302,7 +302,7 @@ cub lk list
 - **Port range ceiling:** if all of `30000-30099` is taken, `lk up` fails with a clear error. Free up some ports or use `--no-ports`.
 - **No multi-node clusters:** kind only spins up a single control-plane node. If you need multi-node topologies, this isn't (yet) the right tool.
 - **Worker delete during teardown takes a few seconds** while waiting for the pod's connection to drop after the kind cluster goes away. The retry loop handles this transparently.
-- **`cub --where Annotations.X`** isn't supported today, so the structured per-cluster annotations aren't directly queryable. The `Labels.cub-lk` marker covers the "show me all my lk clusters" case. See [confighubai/confighub#4346](https://github.com/confighubai/confighub/issues/4346).
+- **`cub --where Annotations.X`** isn't supported today, so the structured per-cluster annotations aren't directly queryable via `--where`. The `Labels.cub-lk` marker covers the "show me all my lk clusters" case.
 
 ## Architecture
 
@@ -316,16 +316,10 @@ internal/state/         # kubeconfig path conventions + LkClusterNames() listing
 
 Notes on what the SDK does vs what lk shells out to:
 
-- **SDK (`github.com/confighub/sdk/core`)** is used for all ConfigHub API CRUD: list/create/delete spaces, create workers (with declared `SupportedConfigTypes`), create targets, create units. Auth is `Authorization: Bearer $CUB_TOKEN` against `$CUB_SERVER/api`.
-- **`cub` is shelled out** only for `cub worker install --export --include-secret`, which is a 250-line manifest generator inside cub's `package main`. Re-implementing it in lk would mean tracking cub-internal logic over time. Lifting it into the SDK is filed as [confighubai/confighub#4345](https://github.com/confighubai/confighub/issues/4345).
+- **[`github.com/confighub/sdk/core`](https://github.com/confighub/sdk)** is used for all ConfigHub API CRUD: list/create/delete spaces, create workers (with declared `SupportedConfigTypes`), create targets, create units. Auth is `Authorization: Bearer $CUB_TOKEN` against `$CUB_SERVER/api`.
+- **`cub` is shelled out** for `cub worker install --export --include-secret` — the worker-manifest generator currently lives in cub's `package main` ([source](https://github.com/confighub/sdk/blob/main/cmd/cub/worker_install.go)), so reimplementing it in lk would couple this plugin to cub-internal logic. Shelling out keeps lk thin.
 - **`kind` and `kubectl`** are shelled out for cluster lifecycle and applying the manifest.
 - **`docker ps`** is shelled out for port-collision detection.
-
-## Related issues filed against ConfigHub
-
-- [#4344](https://github.com/confighubai/confighub/issues/4344) — `CUB_CONFIG` env var: docs say directory, code reads as file, breaks plugins that shell out to `cub`.
-- [#4345](https://github.com/confighubai/confighub/issues/4345) — SDK extraction candidates surfaced building lk (`cubapi.NewPluginClient`, `NewSpacePrefix`, worker-install manifest generator).
-- [#4346](https://github.com/confighubai/confighub/issues/4346) — `cub --where Annotations.X` not supported.
 
 ## Development
 

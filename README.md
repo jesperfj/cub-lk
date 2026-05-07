@@ -97,26 +97,47 @@ What it does, in order:
 7. Creates a `Target` bound to the worker, with `KubeContext` pointing at the new kind context.
 8. Stores the worker manifest as a `Unit` (`worker-config`) in the Space, bound to the target. (Skipped with `--no-unit`.)
 9. `kubectl apply`s the manifest into the cluster.
-10. Records the cluster in `$CUB_CONFIG/lk/state.yaml`.
 
-If any step fails, lk rolls back what it created (kind cluster, then `cub space delete --recursive`).
+If any step fails, lk rolls back what it created (kind cluster, then `cub space delete --recursive`). lk does not write a state file; everything it needs to know on subsequent commands is derived from the kubeconfig file at `$CUB_CONFIG/lk/<name>.kubeconfig` plus the Space's annotations in ConfigHub.
 
 ### `cub lk down --name <cluster>`
 
-1. Deletes the kind cluster — this stops the worker pod, dropping its connection to ConfigHub. Necessary because cub refuses to delete a Connected worker.
-2. Deletes the ConfigHub Space recursively (cascades Unit, Target, Worker), retrying for up to 30s while the worker connection clears.
-3. Removes the dedicated kubeconfig file.
-4. Removes the cluster from `state.yaml`.
+```
+--name string   cluster name (required)
+--force         delete the local kind cluster + kubeconfig even if no
+                matching ConfigHub Space is found in the current context
+```
+
+1. Looks up the cluster's Space in the current cub context (matching by `Annotations.ijn.me/cub-lk-cluster-name`).
+2. If no matching Space is found, fails with a "are you in the right context?" hint. Pass `--force` to skip the ConfigHub side and just delete the local kind cluster + kubeconfig.
+3. Deletes the kind cluster — this stops the worker pod, dropping its connection to ConfigHub. Necessary because cub refuses to delete a Connected worker.
+4. Deletes the ConfigHub Space recursively (cascades Unit, Target, Worker), retrying for up to 30s while the worker connection clears.
+5. Removes the dedicated kubeconfig file.
 
 ### `cub lk list`
 
-Reads `state.yaml` and prints a table:
+Shows the union of:
+- Local kubeconfig files at `$CUB_CONFIG/lk/*.kubeconfig` (clusters lk created on this host)
+- ConfigHub Spaces in the current cub context with `Labels.cub-lk = 'true'` and `Annotations.ijn.me/cub-lk-host = <my-hostname>`
+
+Cross-references with `kind get clusters` to flag drift.
 
 ```
-NAME      SPACE             PORTS        KUBECONFIG                                       CREATED
-lk-a      lk-a-cluster      30010-30019  /Users/jesper/.confighub/lk/lk-a.kubeconfig      2026-05-06 20:48
-lk-b      lk-b-cluster      30020-30029  /Users/jesper/.confighub/lk/lk-b.kubeconfig      2026-05-06 20:48
+NAME        SPACE               PORTS        KUBECONFIG                                         STATUS
+lk-a        lk-a-cluster        30010-30019  /Users/jesper/.confighub/lk/lk-a.kubeconfig        Ready
+ghrfw       -                   -            /Users/jesper/.confighub/lk/ghrfw.kubeconfig       Local only (no Space in current context)
+lk-stale    lk-stale-cluster    30020-30029  /Users/jesper/.confighub/lk/lk-stale.kubeconfig    Drift: kind cluster missing
 ```
+
+The STATUS column reports any drift transparently:
+
+| Status | Meaning |
+|---|---|
+| `Ready` | local kubeconfig + kind cluster + matching Space |
+| `Local only (no Space in current context)` | local kubeconfig + kind cluster, but no Space here — likely registered against a different cub context |
+| `Drift: kind cluster missing` | local kubeconfig + Space, but the kind cluster is gone (someone ran `kind delete cluster` directly) |
+| `Stale kubeconfig` | local kubeconfig only — both kind cluster and Space are gone |
+| `ConfigHub only` / `Stranded` | other partial-cleanup combinations |
 
 ### `cub lk version`
 
@@ -221,12 +242,18 @@ cub --context local lk up
 
 `cub` forwards the active context's server URL and token to the plugin via env. There's no separate `--server` flag on `lk` itself — context selection is the supported mechanism.
 
-### State file
+### No state file
 
-`$CUB_CONFIG/lk/state.yaml` (default: `~/.confighub/lk/state.yaml`) tracks the clusters lk has created. Don't edit by hand. If it gets out of sync with reality, you can:
+There is no `state.yaml`. lk derives everything it needs at command time from two authoritative sources:
 
-- Find lk-managed Spaces in your cub org with `cub space list --where "Labels.cub-lk = 'true'"` and clean them up with `cub space delete --recursive`.
-- Find leftover kind clusters with `kind get clusters` and remove them with `kind delete cluster --name <n>`.
+- Per-cluster kubeconfig files at `$CUB_CONFIG/lk/<name>.kubeconfig` — the marker that says "lk created this cluster on this host" (created by `lk up`, removed by `lk down`).
+- ConfigHub Spaces in the current cub context with `Labels.cub-lk = 'true'` and the `ijn.me/cub-lk-host` annotation matching this hostname.
+
+This means lk can never get out of sync with itself. Drift between local and ConfigHub state is visible in `lk list`'s STATUS column and is recoverable manually:
+
+- Lk-managed Space without local kind cluster → `cub space delete <slug> --recursive`
+- Local kubeconfig + kind cluster without matching Space → `cub lk down --name <n> --force` (or just `kind delete cluster --name <n>` and `rm <kubeconfig>`).
+- Find lk-managed Spaces across your cub org with `cub space list --where "Labels.cub-lk = 'true'"`.
 
 ## Common workflows
 
@@ -284,7 +311,7 @@ cmd/                    # cobra commands (up, down, list, version)
 internal/cubclient/     # SDK wrapper: env-driven OpenAPI client + space/worker/target/unit ops
 internal/kindcli/       # shell-outs to kind, kubectl, and `cub worker install --export`
 internal/docker/        # docker ps probe + free-port-window picker
-internal/state/         # ~/.confighub/lk/state.yaml read/write
+internal/state/         # kubeconfig path conventions + LkClusterNames() listing
 ```
 
 Notes on what the SDK does vs what lk shells out to:

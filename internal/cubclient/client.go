@@ -22,11 +22,32 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/confighub/sdk/core/cubbyname"
 	goclient "github.com/confighub/sdk/core/openapi/goclient-new"
 	"github.com/google/uuid"
 )
+
+// Annotation keys lk writes onto every Space it creates.
+const (
+	AnnotationClusterName = "ijn.me/cub-lk-cluster-name"
+	AnnotationPortRange   = "ijn.me/cub-lk-port-range"
+	AnnotationHost        = "ijn.me/cub-lk-host"
+	// LabelLk is the queryable marker label.
+	LabelLk = "cub-lk"
+)
+
+// LkSpace represents one lk-managed Space, decoded from the cub-lk Label
+// and ijn.me/cub-lk-* annotations.
+type LkSpace struct {
+	SpaceID     uuid.UUID
+	SpaceSlug   string
+	ClusterName string // from AnnotationClusterName; falls back to SpaceSlug
+	PortRange   string // from AnnotationPortRange
+	Host        string // from AnnotationHost
+	CreatedAt   time.Time
+}
 
 type Client struct {
 	api    *goclient.ClientWithResponses
@@ -99,6 +120,48 @@ func (c *Client) listAllSpaces(ctx context.Context) ([]string, error) {
 		if ext.Space != nil {
 			out = append(out, ext.Space.Slug)
 		}
+	}
+	return out, nil
+}
+
+// ListLkSpacesForHost returns all Spaces in the current cub context that
+// carry the cub-lk Label and have AnnotationHost matching the given
+// hostname. The Label filter runs server-side via --where; the host
+// filter is applied client-side because Annotations.X is not currently
+// queryable in cub --where.
+func (c *Client) ListLkSpacesForHost(ctx context.Context, hostname string) ([]LkSpace, error) {
+	where := fmt.Sprintf("Labels.%s = 'true'", LabelLk)
+	resp, err := c.api.ListSpacesWithResponse(ctx, &goclient.ListSpacesParams{Where: &where})
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode() != http.StatusOK {
+		return nil, fmt.Errorf("list lk spaces: %s: %s", resp.Status(), string(resp.Body))
+	}
+	if resp.JSON200 == nil {
+		return nil, nil
+	}
+	var out []LkSpace
+	for _, ext := range *resp.JSON200 {
+		if ext.Space == nil {
+			continue
+		}
+		host := ext.Space.Annotations[AnnotationHost]
+		if host != hostname {
+			continue
+		}
+		name := ext.Space.Annotations[AnnotationClusterName]
+		if name == "" {
+			name = ext.Space.Slug
+		}
+		out = append(out, LkSpace{
+			SpaceID:     ext.Space.SpaceID,
+			SpaceSlug:   ext.Space.Slug,
+			ClusterName: name,
+			PortRange:   ext.Space.Annotations[AnnotationPortRange],
+			Host:        host,
+			CreatedAt:   ext.Space.CreatedAt,
+		})
 	}
 	return out, nil
 }

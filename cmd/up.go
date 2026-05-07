@@ -85,9 +85,16 @@ the container path. CONTAINER defaults to /mnt/<basename of host>.`,
 	c.Flags().StringVar(&namespace, "namespace", "confighub", "Kubernetes namespace for the worker target binding")
 	c.Flags().BoolVar(&skipUnit, "no-unit", false, "skip creating the worker-config Unit in ConfigHub")
 	c.Flags().StringArrayVar(&mountArgs, "mount", nil, "host:container bind mount (repeatable; container path defaults to /mnt/<basename>)")
-	c.Flags().BoolVar(&noPorts, "no-ports", false, "skip default localhost:30000-30009 port mappings (useful when running multiple lk clusters)")
+	c.Flags().BoolVar(&noPorts, "no-ports", false, "skip default port mappings")
 	return c
 }
+
+// Slugs and constants used by lk-managed entities inside each Space.
+const (
+	workerSlug = "worker"
+	targetSlug = "target"
+	unitSlug   = "worker-config"
+)
 
 type upOptions struct {
 	name      string
@@ -194,12 +201,8 @@ func runUp(ctx context.Context, out io.Writer, opts upOptions) error {
 		opts.spaceSlug = opts.name + "-cluster"
 	}
 
-	st, err := state.Load()
-	if err != nil {
-		return err
-	}
-	if _, ok := st.Get(opts.name); ok {
-		return fmt.Errorf("cluster %q is already tracked in state at %s", opts.name, state.Path())
+	if _, err := os.Stat(state.KubeconfigPathFor(opts.name)); err == nil {
+		return fmt.Errorf("kubeconfig %s already exists; cluster %q may already be lk-managed (run `cub lk list` or remove the file)", state.KubeconfigPathFor(opts.name), opts.name)
 	}
 
 	if exists, err := client.SpaceExists(ctx, opts.spaceSlug); err != nil {
@@ -214,9 +217,10 @@ func runUp(ctx context.Context, out io.Writer, opts upOptions) error {
 		return fmt.Errorf("kind cluster %q already exists", opts.name)
 	}
 
-	const workerSlug = "worker"
-	const targetSlug = "target"
-	const unitSlug = "worker-config"
+	if err := state.EnsureKubeconfigDir(); err != nil {
+		return err
+	}
+
 	kubeconfigPath := state.KubeconfigPathFor(opts.name)
 
 	var ports []kindcli.PortMapping
@@ -309,26 +313,6 @@ func runUp(ctx context.Context, out io.Writer, opts upOptions) error {
 
 	fmt.Fprintf(out, "Applying worker manifest to cluster (kubectl --kubeconfig %s apply)...\n", kubeconfigPath)
 	if err := kindcli.KubectlApply(ctx, kubeconfigPath, manifest, out); err != nil {
-		return err
-	}
-
-	rec := state.Cluster{
-		Name:           opts.name,
-		KubeContext:    kubeContext,
-		KubeconfigPath: kubeconfigPath,
-		SpaceSlug:      opts.spaceSlug,
-		WorkerSlug:     workerSlug,
-		TargetSlug:     targetSlug,
-		PortRange:      portRange,
-		CreatedAt:      time.Now().UTC(),
-	}
-	if !opts.skipUnit {
-		rec.UnitSlug = unitSlug
-	}
-	if err := st.Add(rec); err != nil {
-		return err
-	}
-	if err := st.Save(); err != nil {
 		return err
 	}
 

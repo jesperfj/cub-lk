@@ -134,14 +134,32 @@ func Delete(ctx context.Context, name, kubeconfigPath string, out io.Writer) err
 	return nil
 }
 
-// Exists reports whether a kind cluster with the given name exists.
-func Exists(ctx context.Context, name string) (bool, error) {
+// ListClusters returns the names of all kind clusters on the host (any
+// source — lk-managed or not).
+func ListClusters(ctx context.Context) ([]string, error) {
 	out, err := exec.CommandContext(ctx, "kind", "get", "clusters").Output()
 	if err != nil {
-		return false, fmt.Errorf("kind get clusters: %w", err)
+		return nil, fmt.Errorf("kind get clusters: %w", err)
 	}
+	var names []string
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		if strings.TrimSpace(line) == name {
+		l := strings.TrimSpace(line)
+		if l == "" || l == "No kind clusters found." {
+			continue
+		}
+		names = append(names, l)
+	}
+	return names, nil
+}
+
+// Exists reports whether a kind cluster with the given name exists.
+func Exists(ctx context.Context, name string) (bool, error) {
+	clusters, err := ListClusters(ctx)
+	if err != nil {
+		return false, err
+	}
+	for _, c := range clusters {
+		if c == name {
 			return true, nil
 		}
 	}

@@ -14,61 +14,83 @@ import (
 )
 
 func newDownCmd() *cobra.Command {
-	var name string
+	var (
+		name  string
+		force bool
+	)
 	c := &cobra.Command{
 		Use:   "down",
 		Short: "Tear down a kind cluster and its ConfigHub space",
+		Long: `Tears down an lk-managed cluster.
+
+Looks up the cluster's Space in the current cub context (via the
+ijn.me/cub-lk-cluster-name annotation). If found, deletes the kind
+cluster, then deletes the Space recursively (cascading Unit, Target,
+Worker), then removes the local kubeconfig.
+
+If no matching Space is found in the current context, fails with a
+"are you in the right context?" hint. Pass --force to delete the local
+kind cluster + kubeconfig anyway, leaving any ConfigHub side untouched.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if name == "" {
 				return fmt.Errorf("--name is required")
 			}
 			ctx, cancel := context.WithTimeout(cmd.Context(), 5*time.Minute)
 			defer cancel()
-			return runDown(ctx, cmd.OutOrStdout(), name)
+			return runDown(ctx, cmd.OutOrStdout(), name, force)
 		},
 	}
 	c.Flags().StringVar(&name, "name", "", "cluster name (required)")
+	c.Flags().BoolVar(&force, "force", false, "delete the local kind cluster + kubeconfig even if no matching ConfigHub Space is found in the current context")
 	return c
 }
 
-func runDown(ctx context.Context, out io.Writer, name string) error {
-	st, err := state.Load()
-	if err != nil {
-		return err
-	}
-	rec, ok := st.Get(name)
-	if !ok {
-		return fmt.Errorf("cluster %q not found in lk state (%s); if you created the cluster manually, use `kind delete cluster --name %s`", name, state.Path(), name)
-	}
+func runDown(ctx context.Context, out io.Writer, name string, force bool) error {
+	hostname, _ := os.Hostname()
+	kubeconfigPath := state.KubeconfigPathFor(name)
 
 	client, err := cubclient.New()
 	if err != nil {
 		return err
 	}
 
-	// Kill the cluster first so the worker pod stops and the connection
-	// drops — cub rejects deletion of a Connected worker.
-	fmt.Fprintf(out, "Deleting kind cluster %q...\n", rec.Name)
-	if err := kindcli.Delete(ctx, rec.Name, rec.KubeconfigPath, out); err != nil {
-		fmt.Fprintf(out, "  warning: %v\n", err)
+	spaces, err := client.ListLkSpacesForHost(ctx, hostname)
+	if err != nil {
+		return fmt.Errorf("look up lk spaces: %w", err)
 	}
-
-	fmt.Fprintf(out, "Deleting Space %q (recursive: cascades to Unit, Target, Worker)...\n", rec.SpaceSlug)
-	if err := retryDelete(ctx, 30*time.Second, func() error {
-		return client.DeleteSpaceBySlug(ctx, rec.SpaceSlug, true)
-	}); err != nil {
-		fmt.Fprintf(out, "  warning: %v\n", err)
-	}
-
-	if rec.KubeconfigPath != "" {
-		if err := os.Remove(rec.KubeconfigPath); err != nil && !os.IsNotExist(err) {
-			fmt.Fprintf(out, "  warning: removing kubeconfig: %v\n", err)
+	var match *cubclient.LkSpace
+	for i := range spaces {
+		if spaces[i].ClusterName == name {
+			match = &spaces[i]
+			break
 		}
 	}
 
-	st.Remove(rec.Name)
-	if err := st.Save(); err != nil {
-		return err
+	if match == nil {
+		if !force {
+			return fmt.Errorf("no lk-managed Space for %q in the current cub context (are you in the right context?). Pass --force to delete the local kind cluster + kubeconfig anyway", name)
+		}
+		fmt.Fprintf(out, "No matching Space in current context — proceeding with --force (local cleanup only)\n")
+	}
+
+	// Delete the kind cluster first so the worker pod stops and the
+	// connection drops; cub rejects deletion of a Connected worker.
+	fmt.Fprintf(out, "Deleting kind cluster %q...\n", name)
+	if err := kindcli.Delete(ctx, name, kubeconfigPath, out); err != nil {
+		fmt.Fprintf(out, "  warning: %v\n", err)
+	}
+
+	if match != nil {
+		fmt.Fprintf(out, "Deleting Space %q (recursive: cascades to Unit, Target, Worker)...\n", match.SpaceSlug)
+		if err := retryDelete(ctx, 30*time.Second, func() error {
+			return client.DeleteSpaceBySlug(ctx, match.SpaceSlug, true)
+		}); err != nil {
+			fmt.Fprintf(out, "  warning: %v\n", err)
+		}
+	}
+
+	if err := os.Remove(kubeconfigPath); err != nil && !os.IsNotExist(err) {
+		fmt.Fprintf(out, "  warning: removing kubeconfig: %v\n", err)
 	}
 
 	fmt.Fprintf(out, "\nDone.\n")

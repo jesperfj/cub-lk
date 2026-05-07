@@ -1,5 +1,9 @@
-// Package state persists the set of clusters lk has created. The file
-// lives at ${CUB_CONFIG:-$HOME/.confighub}/lk/state.yaml.
+// Package state provides path conventions and a directory-listing helper
+// for the per-cluster kubeconfig files lk creates. There is no state file:
+// "lk knows about this cluster" is implied by the existence of
+// $CUB_CONFIG/lk/<name>.kubeconfig (created by `lk up`, removed by
+// `lk down`). All other per-cluster metadata comes from the corresponding
+// ConfigHub Space's annotations.
 package state
 
 import (
@@ -7,37 +11,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
-	"time"
-
-	"gopkg.in/yaml.v3"
+	"strings"
 )
 
-type Cluster struct {
-	Name           string    `yaml:"name"`
-	KubeContext    string    `yaml:"kubeContext"`
-	KubeconfigPath string    `yaml:"kubeconfigPath"`
-	SpaceSlug      string    `yaml:"spaceSlug"`
-	WorkerSlug     string    `yaml:"workerSlug"`
-	TargetSlug     string    `yaml:"targetSlug"`
-	UnitSlug       string    `yaml:"unitSlug,omitempty"`
-	PortRange      string    `yaml:"portRange,omitempty"`
-	CreatedAt      time.Time `yaml:"createdAt"`
-}
-
-// KubeconfigPathFor returns the standard per-cluster kubeconfig path.
-func KubeconfigPathFor(name string) string {
-	return filepath.Join(filepath.Dir(Path()), name+".kubeconfig")
-}
-
-type State struct {
-	Clusters []Cluster `yaml:"clusters"`
-
-	path string
-}
-
-// Path returns the on-disk location of the state file.
-func Path() string {
+// KubeconfigDir returns the directory where lk stores per-cluster kubeconfigs.
+func KubeconfigDir() string {
 	dir := os.Getenv("CUB_CONFIG")
 	if dir == "" {
 		home, err := os.UserHomeDir()
@@ -46,82 +24,40 @@ func Path() string {
 		}
 		dir = filepath.Join(home, ".confighub")
 	}
-	return filepath.Join(dir, "lk", "state.yaml")
+	return filepath.Join(dir, "lk")
 }
 
-// Load reads the state file. Missing file returns an empty State.
-func Load() (*State, error) {
-	p := Path()
-	s := &State{path: p}
-	data, err := os.ReadFile(p)
+// KubeconfigPathFor returns the per-cluster kubeconfig path for a given name.
+func KubeconfigPathFor(name string) string {
+	return filepath.Join(KubeconfigDir(), name+".kubeconfig")
+}
+
+// LkClusterNames returns the cluster names lk has tracked locally based on
+// kubeconfig files at $CUB_CONFIG/lk/*.kubeconfig. Order is sorted by
+// filesystem listing.
+func LkClusterNames() ([]string, error) {
+	entries, err := os.ReadDir(KubeconfigDir())
 	if errors.Is(err, os.ErrNotExist) {
-		return s, nil
+		return nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("read state: %w", err)
+		return nil, fmt.Errorf("read lk kubeconfig dir: %w", err)
 	}
-	if len(data) == 0 {
-		return s, nil
-	}
-	if err := yaml.Unmarshal(data, s); err != nil {
-		return nil, fmt.Errorf("parse state: %w", err)
-	}
-	s.path = p
-	return s, nil
-}
-
-// Save writes state atomically.
-func (s *State) Save() error {
-	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
-		return err
-	}
-	data, err := yaml.Marshal(s)
-	if err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(s.path), ".state-*.yaml")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmpName, s.path)
-}
-
-// Get returns the cluster with the given name, or false if absent.
-func (s *State) Get(name string) (Cluster, bool) {
-	for _, c := range s.Clusters {
-		if c.Name == name {
-			return c, true
+	var names []string
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
 		}
-	}
-	return Cluster{}, false
-}
-
-// Add appends a cluster. Returns an error if the name already exists.
-func (s *State) Add(c Cluster) error {
-	if _, ok := s.Get(c.Name); ok {
-		return fmt.Errorf("cluster %q already tracked", c.Name)
-	}
-	s.Clusters = append(s.Clusters, c)
-	sort.SliceStable(s.Clusters, func(i, j int) bool { return s.Clusters[i].Name < s.Clusters[j].Name })
-	return nil
-}
-
-// Remove deletes a cluster entry. No-op if absent.
-func (s *State) Remove(name string) {
-	out := s.Clusters[:0]
-	for _, c := range s.Clusters {
-		if c.Name != name {
-			out = append(out, c)
+		name, ok := strings.CutSuffix(e.Name(), ".kubeconfig")
+		if !ok {
+			continue
 		}
+		names = append(names, name)
 	}
-	s.Clusters = out
+	return names, nil
+}
+
+// EnsureKubeconfigDir creates the directory if missing.
+func EnsureKubeconfigDir() error {
+	return os.MkdirAll(KubeconfigDir(), 0o755)
 }

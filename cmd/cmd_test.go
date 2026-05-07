@@ -46,7 +46,7 @@ func TestListEmpty(t *testing.T) {
 	if err := r.Execute(); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(buf.String(), "No clusters tracked") {
+	if !strings.Contains(buf.String(), "No lk clusters tracked") {
 		t.Errorf("expected empty-list message, got %q", buf.String())
 	}
 }

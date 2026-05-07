@@ -91,7 +91,7 @@ What it does, in order:
 1. Picks a cluster name (auto-generated via `cubbyname.Random()` if `--name` is omitted).
 2. Probes `docker ps` for currently-bound host ports; reserves the first free 10-port window inside `30000-30099`.
 3. Creates the kind cluster with that port window mapped on the control-plane node and a dedicated kubeconfig at `$CUB_CONFIG/lk/<name>.kubeconfig` — never merged into `~/.kube/config`.
-4. Creates a ConfigHub Space (`<name>-cluster` by default), tagged with `Labels.cubLk=true` and a set of `ijn.me/cub-lk-*` annotations (cluster name, host, port range).
+4. Creates a ConfigHub Space (`<name>-cluster` by default), tagged with `Labels.cub-lk=true` and a set of `ijn.me/cub-lk-*` annotations (cluster name, host, port range).
 5. Creates a `BridgeWorker` in the Space with `Kubernetes/YAML` provider declared upfront — so target binding doesn't have to wait for the worker pod to connect.
 6. Generates the worker Kubernetes manifest by shelling out to `cub worker install --export --include-secret`. If the cub server is on localhost, rewrites `CONFIGHUB_URL` to `host.docker.internal:<port>` so the pod (running inside docker) can reach the host.
 7. Creates a `Target` bound to the worker, with `KubeContext` pointing at the new kind context.
@@ -168,7 +168,7 @@ Every Space lk creates carries:
 
 | Key | Example |
 |---|---|
-| `Labels.cubLk` | `"true"` (queryable marker) |
+| `Labels.cub-lk` | `"true"` (queryable marker) |
 | `Annotations.ijn.me/cub-lk-cluster-name` | `fur-ball` |
 | `Annotations.ijn.me/cub-lk-port-range` | `30010-30019` |
 | `Annotations.ijn.me/cub-lk-host` | `MacBook-Pro.local` |
@@ -176,7 +176,7 @@ Every Space lk creates carries:
 Find all your lk clusters across the org:
 
 ```
-cub space list --where "Labels.cubLk = 'true'"
+cub space list --where "Labels.cub-lk = 'true'"
 ```
 
 (Currently `--where Annotations.X` is not supported by cub; tracked in [confighubai/confighub#4346](https://github.com/confighubai/confighub/issues/4346). Annotations are still visible via `cub space get -o yaml` and the UI.)
@@ -225,7 +225,7 @@ cub --context local lk up
 
 `$CUB_CONFIG/lk/state.yaml` (default: `~/.confighub/lk/state.yaml`) tracks the clusters lk has created. Don't edit by hand. If it gets out of sync with reality, you can:
 
-- Find lk-managed Spaces in your cub org with `cub space list --where "Labels.cubLk = 'true'"` and clean them up with `cub space delete --recursive`.
+- Find lk-managed Spaces in your cub org with `cub space list --where "Labels.cub-lk = 'true'"` and clean them up with `cub space delete --recursive`.
 - Find leftover kind clusters with `kind get clusters` and remove them with `kind delete cluster --name <n>`.
 
 ## Common workflows
@@ -275,7 +275,7 @@ cub lk list
 - **Port range ceiling:** if all of `30000-30099` is taken, `lk up` fails with a clear error. Free up some ports or use `--no-ports`.
 - **No multi-node clusters:** kind only spins up a single control-plane node. If you need multi-node topologies, this isn't (yet) the right tool.
 - **Worker delete during teardown takes a few seconds** while waiting for the pod's connection to drop after the kind cluster goes away. The retry loop handles this transparently.
-- **`cub --where Annotations.X`** isn't supported today, so the structured per-cluster annotations aren't directly queryable. The `Labels.cubLk` marker covers the "show me all my lk clusters" case. See [confighubai/confighub#4346](https://github.com/confighubai/confighub/issues/4346).
+- **`cub --where Annotations.X`** isn't supported today, so the structured per-cluster annotations aren't directly queryable. The `Labels.cub-lk` marker covers the "show me all my lk clusters" case. See [confighubai/confighub#4346](https://github.com/confighubai/confighub/issues/4346).
 
 ## Architecture
 

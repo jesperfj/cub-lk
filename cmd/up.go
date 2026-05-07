@@ -29,9 +29,11 @@ const (
 	annotationPortRange   = "ijn.me/cub-lk-port-range"
 	annotationHost        = "ijn.me/cub-lk-host"
 
-	// labelLk is a simple-keyed marker label set on every lk Space so it
-	// IS queryable: `cub space list --where "Labels.cubLk = 'true'"`.
-	labelLk = "cubLk"
+	// labelLk is a marker label set on every lk Space so it is queryable:
+	// `cub space list --where "Labels.cub-lk = 'true'"`. Matches the
+	// project name; hyphens are accepted by the where-filter parser as
+	// long as the key is unquoted.
+	labelLk = "cub-lk"
 
 	// Default search range and window size for port allocation.
 	portRangeStart = 30000

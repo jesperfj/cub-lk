@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 )
 
@@ -142,7 +143,7 @@ func ListClusters(ctx context.Context) ([]string, error) {
 		return nil, fmt.Errorf("kind get clusters: %w", err)
 	}
 	var names []string
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+	for line := range strings.SplitSeq(strings.TrimSpace(string(out)), "\n") {
 		l := strings.TrimSpace(line)
 		if l == "" || l == "No kind clusters found." {
 			continue
@@ -158,12 +159,7 @@ func Exists(ctx context.Context, name string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	for _, c := range clusters {
-		if c == name {
-			return true, nil
-		}
-	}
-	return false, nil
+	return slices.Contains(clusters, name), nil
 }
 
 // KubectlApply pipes the manifest to `kubectl --kubeconfig <path> apply -f -`.
@@ -203,6 +199,10 @@ func CubWorkerInstallExport(ctx context.Context, workerSlug, spaceSlug, override
 		"--export",
 		"--include-secret",
 		"-t", "Kubernetes",
+		// lk pins the cluster's worker to a single Target it owns. Disabling
+		// auto-target creation prevents the worker from spawning extra
+		// Targets when it discovers other ConfigTypes on the cluster.
+		"-e", "CONFIGHUB_DISABLE_AUTO_TARGET_CREATION=1",
 	}
 	if overrideConfigHubURL != "" {
 		args = append(args, "-e", "CONFIGHUB_URL="+overrideConfigHubURL)
@@ -236,12 +236,12 @@ func scrubbedCubEnv() []string {
 	src := os.Environ()
 	out := make([]string, 0, len(src))
 	for _, kv := range src {
-		eq := strings.IndexByte(kv, '=')
-		if eq < 0 {
+		key, _, ok := strings.Cut(kv, "=")
+		if !ok {
 			out = append(out, kv)
 			continue
 		}
-		if _, drop := skip[kv[:eq]]; drop {
+		if _, drop := skip[key]; drop {
 			continue
 		}
 		out = append(out, kv)

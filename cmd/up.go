@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -16,6 +18,7 @@ import (
 	"github.com/jesperfj/cub-lk/internal/kindcli"
 	"github.com/jesperfj/cub-lk/internal/state"
 	"github.com/spf13/cobra"
+	"gopkg.in/yaml.v3"
 )
 
 const (
@@ -305,8 +308,12 @@ func runUp(ctx context.Context, out io.Writer, opts upOptions) error {
 	}
 
 	if !opts.skipUnit {
-		fmt.Fprintf(out, "Storing worker manifest as Unit %q...\n", unitSlug)
-		if _, err := client.CreateYAMLUnit(ctx, spaceID, targetID, unitSlug, unitSlug, manifest); err != nil {
+		fmt.Fprintf(out, "Storing worker manifest as Unit %q (without Secret)...\n", unitSlug)
+		unitManifest, err := stripSecretsFromManifest(manifest)
+		if err != nil {
+			return fmt.Errorf("strip secrets from manifest: %w", err)
+		}
+		if _, err := client.CreateYAMLUnit(ctx, spaceID, targetID, unitSlug, unitSlug, unitManifest); err != nil {
 			return err
 		}
 	}
@@ -335,5 +342,59 @@ func runUp(ctx context.Context, out io.Writer, opts upOptions) error {
 	}
 	fmt.Fprintf(out, "\nUse the cluster:\n  KUBECONFIG=%s kubectl get pods -A\n", kubeconfigPath)
 	return nil
+}
+
+// stripSecretsFromManifest returns the multi-document YAML with all
+// `kind: Secret` documents removed. The worker bearer-token Secret must be
+// applied to the local cluster (so the worker pod can authenticate to the
+// ConfigHub API) but should not be uploaded to ConfigHub as part of the
+// worker-config Unit.
+func stripSecretsFromManifest(manifest []byte) ([]byte, error) {
+	docs := splitYAMLDocuments(manifest)
+	var kept [][]byte
+	for _, doc := range docs {
+		if len(bytes.TrimSpace(doc)) == 0 {
+			continue
+		}
+		var head struct {
+			Kind string `yaml:"kind"`
+		}
+		if err := yaml.Unmarshal(doc, &head); err != nil {
+			return nil, fmt.Errorf("parse doc: %w", err)
+		}
+		if head.Kind == "Secret" {
+			continue
+		}
+		kept = append(kept, doc)
+	}
+	return bytes.Join(kept, []byte("---\n")), nil
+}
+
+// splitYAMLDocuments splits a multi-document YAML stream on lines that are
+// exactly "---" (the YAML document separator). Each returned slice is the
+// document body excluding its terminating separator. Trailing newline on
+// each doc is preserved.
+func splitYAMLDocuments(b []byte) [][]byte {
+	var docs [][]byte
+	var cur bytes.Buffer
+	flush := func() {
+		buf := make([]byte, cur.Len())
+		copy(buf, cur.Bytes())
+		docs = append(docs, buf)
+		cur.Reset()
+	}
+	sc := bufio.NewScanner(bytes.NewReader(b))
+	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	for sc.Scan() {
+		line := sc.Bytes()
+		if bytes.Equal(bytes.TrimRight(line, " \t"), []byte("---")) {
+			flush()
+			continue
+		}
+		cur.Write(line)
+		cur.WriteByte('\n')
+	}
+	flush()
+	return docs
 }
 
